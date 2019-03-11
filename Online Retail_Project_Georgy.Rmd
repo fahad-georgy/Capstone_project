@@ -1,0 +1,663 @@
+---
+title: "Online_Retail_Data_Analysis"
+author: "Md_Fahd_Al_Georgy"
+date: "March 11,2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R Markdown
+
+
+
+```{r loading required packages}
+#-----------------------------------------Initial Setup----------------------------------------------
+#====================================================================================================
+#create a function to check for installed packages and install them if they are not installed
+install <- function(packages){
+  new.packages <- packages[!(packages %in% installed.packages()[, "Package"])]
+  if (length(new.packages)) 
+    install.packages(new.packages, dependencies = TRUE)
+  sapply(packages, require, character.only = TRUE)
+}
+
+# usage
+required.packages <- c("caret", "broom", "ggcorrplot","matrixStats", "tidyverse", "timetk", "prophet", "tidyquant", "modelr", "gridExtra", "grid")
+install(required.packages)
+options(na.action = na.warn)
+```
+
+## Loading and Preprocessing of dataset 
+
+```{r load retail dataset, echo=FALSE}
+retail_data <- read_csv("Online Retail.csv",
+                   col_types = cols(
+                      InvoiceNo = col_character(),
+                      StockCode = col_character(),
+                      Description = col_character(),
+                      Quantity = col_integer(),
+                      InvoiceDate = col_datetime("%m/%d/%Y %H:%M"),
+                      UnitPrice = col_double(),
+                      CustomerID = col_integer(),
+                      Country = col_character()
+                      )) %>%
+  mutate(sell_date = parse_date(format(InvoiceDate, "%Y-%m-%d")),
+         day_of_week = wday(sell_date, label = TRUE),
+         sell_time = parse_time(format(InvoiceDate, "%H:%M")),
+         month = format(InvoiceDate, "%m"),
+         earning = Quantity * UnitPrice,
+         sell_status = ifelse(Quantity > 0, "sold", "returned"))
+```
+
+# Data oraganization
+
+
+```{r}
+write.csv(retail_data, "new_retail_data.csv")
+str(retail_data)
+```
+
+```{r checking missing value }
+colSums(is.na(retail_data))
+
+```
+There are missing values in "Description" and "customerID" columns. However, product description and cutomer IDs will not have any impact on our analysis. So, we rather can keep it as it is. 
+
+#Exploratory Data Analysis
+
+
+```{r unique items }
+sapply(retail_data[,c(2,7,8)],function(x)length(unique(x)))
+```
+We have 4373 customers in our dataset residing across 38 different countries. Form this, we can assume that many among the customers' made repetative transactions throughout the years. 
+
+```{r name of countries  }
+unique(retail_data$Country)
+```
+
+
+```{r }
+plot1 <- retail_data %>%
+  filter(Country == "United Kingdom") %>%
+  ggplot(aes(x = Country, fill = sell_status)) +
+    geom_bar(alpha = .6) +
+    scale_fill_tq(values = palette_dark()) +
+    theme_tq() +
+    theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1)) +
+    guides(fill = FALSE) +
+    labs(x = "")
+
+plot2 <- retail_data %>%
+  filter(Country != "United Kingdom") %>%
+  ggplot(aes(x = Country, fill = sell_status)) +
+    geom_bar(alpha = .6) +
+    scale_fill_tq(values = palette_green()) +
+    theme_tq() +
+    theme(legend.position = "right") +
+    theme(axis.text.x = element_text(angle = 90, vjust = 1, hjust = .9)) +
+    labs(x = "",fill = "")
+title <- textGrob("Country-wise Selling Trend", gp = gpar(fontface = "bold", cex = 1.5))
+grid.arrange(plot1, plot2, top=title ,widths = c(0.2, 1.2))
+```
+
+```{r}
+retail_data %>%
+  ggplot(aes(x = sell_date, color = sell_status)) + ggtitle("Number of sells/returns over time") + 
+  theme(plot.title = element_text(hjust = 0.5))+
+    facet_grid(sell_status ~ ., scales = "free") +
+    geom_freqpoly(bins = 80, size = 1, alpha = 0.9) +
+    scale_color_tq(values = palette_dark()) 
+```
+
+
+```{r }
+retail_data %>%
+  ggplot(aes(x = sell_date, y = ..density.., color = sell_status)) + ggtitle("Relationship between sell and return over time") + 
+  theme(plot.title = element_text(hjust = 0.5))+
+    geom_freqpoly(size = 1, alpha = 0.9, bins = 60) +
+    scale_color_manual(values = palette_light()) 
+    
+```
+
+# Purchases over the time of the day
+```{r}
+retail_data %>%
+  ggplot(aes(x = sell_time, y = sell_date)) + ggtitle("Transactions trend over the time of the day") +   theme(plot.title = element_text(hjust = 0.5))+
+    stat_bin_2d(alpha = 1, bins = 19, color = "grey") +
+    scale_fill_gradientn(colours = c(palette_green()[[1]], palette_dark()[[2]])) 
+```
+
+# Earnings per day over the months of the year
+```{r}
+retail_data %>%
+  mutate(day = format(InvoiceDate, "%d")) %>%
+  group_by(month, day) %>%
+  summarise(Earnings = sum(earning)) %>%
+  ggplot(aes(x = month, y = day, fill = Earnings)) + ggtitle("Total earnings per day over the months") +   theme(plot.title = element_text(hjust = 0.5))+ ylab("Days of the month")+ 
+    geom_tile(alpha = 1, color = "grey") +
+    scale_fill_gradientn(colours = c(palette_green()[[1]], palette_dark()[[2]])) +
+    theme(legend.position = "right") 
+```
+
+
+
+```{r}
+retail_data %>%
+  group_by(StockCode, Description) %>%
+  summarise(Total_Quantity = sum(Quantity)) %>%
+  arrange(-Total_Quantity) %>% head()
+```
+
+```{r}
+p1 <- retail_data %>%
+  group_by(StockCode, Description) %>%
+  summarise(Total_Quantity = sum(Quantity)) %>%
+  ggplot(aes(x = Total_Quantity)) +
+    geom_density(fill = palette_light()[[1]], alpha = 0.8) +
+    theme_tq()
+
+p2 <- retail_data %>%
+  group_by(StockCode, Description) %>%
+  summarise(Total_Quantity = sum(Quantity)) %>%
+  filter(Total_Quantity > 1) %>%
+  ggplot(aes(x = Total_Quantity)) +
+    geom_density(fill = palette_light()[[1]], alpha = 0.8) +
+    theme_tq()
+
+p3 <- retail_data %>%
+  group_by(StockCode, Description) %>%
+  summarise(Total_Quantity = sum(Quantity)) %>%
+  filter(Total_Quantity > 10000) %>%
+  ggplot(aes(x = Total_Quantity)) +
+    geom_density(fill = palette_light()[[1]], alpha = 0.8) +
+    theme_tq()
+title1 <- textGrob("Selling trend of product by quantity", gp = gpar(fontface = "bold", cex = 1.5))    
+grid.arrange(p1, p2, p3, ncol = 3,top=title1 ,widths = c(0.6, 0.5, 0.7))
+```
+
+
+
+```{r}
+top_sold_items <- retail_data %>%
+  group_by(sell_date, StockCode, Description) %>%
+  summarise(sum = sum(Quantity)) %>%
+  group_by(StockCode, Description)%>%
+  summarise(n = n()) %>%
+  arrange(-n)
+
+top_items_transactions <- retail_data %>%
+  filter(StockCode %in% top_sold_items$StockCode[1:5]) %>%
+  group_by(sell_date, StockCode) %>%
+  summarise(sum = sum(Quantity)) %>%
+  spread(key = StockCode, value = sum)
+
+retail_data %>%
+  filter(StockCode %in% top_sold_items$StockCode[1:5]) %>%
+  group_by(sell_date, StockCode, Description) %>%
+  summarise(sum = sum(Quantity)) %>%
+  ggplot(aes(x = sell_date, y = sum)) +
+    facet_wrap(~ StockCode, ncol = 1, scales = "free") +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 0.8) +
+    theme_tq() +
+    labs(Title= "Top 5 Items' Selling Trends", x = "", 
+         y = "Quantity of Sold Items")
+```
+
+```{r }
+retail_data %>%
+  filter(StockCode == "85123A") %>%
+  group_by(sell_date, sell_status) %>%
+  summarise(Most_sold_item = sum(Quantity)) %>%
+  ggplot(aes(x = sell_date, y = Most_sold_item, color = sell_status)) + ggtitle("Transaction History of Most Sold Item") +   theme(plot.title = element_text(hjust = 0.5))+ ylab("Item Quantities")+
+    facet_wrap(~ sell_status, ncol = 1, scales = "free") +
+    geom_line(size = .4, alpha = 1) + 
+    scale_color_tq(values = palette_dark()) 
+    
+```
+
+```{r }
+multiple_transactions <- retail_data %>%
+  group_by(sell_date, CustomerID) %>%
+  summarise(sum = sum(Quantity)) %>%
+  group_by(CustomerID) %>%
+  summarise(n = n()) %>%
+  mutate(revisited_customers = ifelse(n > 1, "reoccurring_customers", "one_time_customers"))
+
+length(which(multiple_transactions$revisited_customers == "reoccurring_customers"))
+```
+
+
+```{r }
+revisited_customers_sell_date <- left_join(retail_data, multiple_transactions, by = "CustomerID") %>%
+  distinct(sell_date, CustomerID, revisited_customers) %>%
+  group_by(sell_date, revisited_customers) %>%
+  summarise(n = n()) %>%
+  spread(key = revisited_customers, value = n)
+multiple_transactions %>%
+  group_by(revisited_customers) %>%
+  summarise(n = n()) %>%
+  mutate(prop = n / sum(n)) %>%
+  ggplot(aes(x = "", y = prop, fill = revisited_customers)) +ggtitle("Ratio of one-time customers & revisiting customers") +   theme(plot.title = element_text(hjust = 0.5))+ ylab("")+ xlab("")+
+    geom_bar(stat = "identity", alpha = 1) +
+    coord_polar("y", start = 0) +
+    scale_fill_tq(values = palette_dark()) 
+    
+```
+
+
+```{r }
+purchases <- retail_data %>%
+  group_by(sell_date, CustomerID) %>%
+  summarise(n = n(),
+            Tot_item = sum(Quantity),
+            Tot_earning = sum(earning)) %>%
+  group_by(sell_date) %>%
+  summarise(mean_earning_per_customer = mean(Tot_earning),
+            mean_quantity_sold_per_customer = mean(Tot_item),
+            mean_items_sold_per_customer = mean(n))
+purchases %>%
+  gather(x, y, mean_earning_per_customer:mean_items_sold_per_customer) %>%
+  ggplot(aes(x = sell_date, y = y)) + ggtitle("Selling Trend per Customer") +   theme(plot.title = element_text(hjust = 0.5))+ ylab("")+ xlab("")+
+    facet_wrap(~ x, ncol = 1, scales = "free") +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 1) +
+    geom_smooth(color = palette_light()[[2]], method = 'loess') 
+    
+```
+
+
+```{r}
+returned_items <- retail_data %>%
+  group_by(sell_date, sell_status) %>%
+  summarise(total_quantity = sum(Quantity)) %>%
+  spread(key = sell_status, value = total_quantity)
+ 
+returned_items%>%
+  gather(x, y, sold:returned) %>%
+  ggplot(aes(x = sell_date, y = y, color = x)) + 
+    geom_line(size = 1, alpha = 0.8) +
+    scale_color_manual(values = palette_light()) +
+    theme_tq() +
+    labs(x = "", 
+         y = "quantity of items",
+         title = "Purchase and Return Over the Time")
+```
+
+#How many different items are purchased/returned per day?
+```{r}
+item_transactions <- retail_data %>%
+  group_by(sell_date, StockCode) %>%
+  summarise(n = n()) %>%
+  group_by(sell_date) %>%
+  summarise(item_transactions = n())
+item_transactions %>%
+  ggplot(aes(x = sell_date, y = item_transactions)) +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 0.8) +
+    geom_smooth(color = palette_light()[[2]], method = 'loess') +
+    theme_tq() +
+    labs(title= "Item Transactions Over the Time" ,x = "", 
+         y = "number of different items",
+         color = "")
+```
+
+
+```{r}
+net_earning <- retail_data %>%
+  group_by(sell_date) %>%
+  summarise(sum_earning = sum(earning),
+            mean_earning = mean(earning),
+            sum_quantity = sum(Quantity),
+            mean_quantity = mean(Quantity))
+net_earning %>%
+  gather(x, y, sum_earning:mean_quantity) %>%
+  ggplot(aes(x = sell_date, y = y)) +
+    facet_wrap(~ x, ncol = 1, scales = "free") +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 0.8) +
+    geom_smooth(color = palette_light()[[2]], method = 'loess') +
+    theme_tq() +
+    labs(title="Mean of Earning and Itme Quantity" ,x = "", 
+         y = "")
+```
+
+# Profit from purchases and returns
+```{r }
+sold_items <- retail_data %>%
+  filter(earning > 0) %>%
+  group_by(sell_date) %>%
+  summarise(sell_earning = sum(earning),
+            #sell_earning_mean = mean(earning),
+            sell_quantity = sum(Quantity))
+            #sell_quantity_mean = mean(Quantity))
+sold_items %>%
+  gather(x, y, sell_earning:sell_quantity) %>%
+  ggplot(aes(x = sell_date, y = y)) +
+    facet_wrap(~ x, ncol = 1, scales = "free") +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 0.8) +
+    geom_smooth(color = palette_light()[[2]], method = 'loess') +
+    theme_tq() +
+    labs(title= "Sell Trends",x = "", 
+         y = "")
+```
+
+
+```{r}
+return_items <- retail_data %>%
+  filter(earning < 0) %>%
+  group_by(sell_date) %>%
+  summarise(return_items_sum_price = sum(earning),
+            mean_return_items_price = mean(earning),
+            quantity_return_items = sum(Quantity),
+            mean_quantity_return_items = mean(Quantity))
+return_items %>%
+  gather(x, y, return_items_sum_price:mean_quantity_return_items) %>%
+  ggplot(aes(x = sell_date, y = y)) +
+    facet_wrap(~ x, ncol = 1, scales = "free") +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 0.8) +
+    theme_tq() +
+    labs(x = "", 
+         y = "")
+```
+
+
+```{r}
+unit_quant <- distinct(select(retail_data, sell_date, StockCode, UnitPrice)) %>%
+  mutate(unit_quant = paste(sell_date, StockCode, sep = "_")) %>%
+  select(unit_quant, UnitPrice)
+
+mean_unit_price <- retail_data %>%
+  filter(sell_status == "sold") %>%
+  group_by(sell_date, StockCode) %>%
+  summarise(n = n()) %>%
+  mutate(unit_quant = paste(sell_date, StockCode, sep = "_")) %>%
+  left_join(unit_quant, by = "unit_quant") %>%
+  group_by(sell_date, StockCode) %>%
+  summarise(mean = mean(UnitPrice)) %>%
+  group_by(sell_date) %>%
+  summarise(mean_unit_price = mean(mean))
+mean_unit_price %>%
+  ggplot(aes(x = sell_date, y = mean_unit_price)) +
+    geom_line(color = palette_light()[[1]], size = 1, alpha = 0.8) +
+    theme_tq() +
+    labs(x = "", 
+         y = "mean unit price of sold items")
+```
+
+
+# Forcasting
+```{r }
+transaction_per_day <- distinct(select(retail_data, sell_date, day_of_week, month)) %>%
+  left_join(net_earning, by = "sell_date") %>%
+  left_join(mean_unit_price, by = "sell_date") %>%
+  left_join(sold_items, by = "sell_date") %>%
+  left_join(return_items, by = "sell_date") %>%
+  left_join(purchases, by = "sell_date") %>%
+  left_join(revisited_customers_sell_date, by = "sell_date") %>%
+  left_join(returned_items, by = "sell_date") %>%
+  left_join(item_transactions, by = "sell_date") %>%
+  left_join(top_items_transactions, by = "sell_date") %>%
+  mutate(diff_sum_earning = sell_earning - lag(sell_earning),
+         season = ifelse(month %in% c("03", "04", "05"), "spring",
+                         ifelse(month %in% c("06", "07", "08"), "summer",
+                                ifelse(month %in% c("09", "10", "11"), "fall", "winter"))))
+```
+
+```{r}
+transaction_per_day <- transaction_per_day %>%
+  mutate(model = ifelse(sell_date <= "2011-10-01", "train", "test"))
+
+colnames(transaction_per_day)[grep("^[0-9]+", colnames(transaction_per_day))] <- paste0("P_", colnames(transaction_per_day)[grep("^[0-9]+", colnames(transaction_per_day))])
+
+```
+
+```{r}
+transaction_per_day %>%
+  ggplot(aes(x = sell_date, y = sell_earning, color = model)) +
+    geom_point(alpha = 0.5) +
+    geom_line(alpha = 0.5) +
+    scale_color_manual(values = palette_light()) +
+    theme_tq()
+```
+
+```{r}
+augmented_transactions <- transaction_per_day %>%
+  rename(date = sell_date) %>%
+  select(model, date, sell_earning) %>% 
+  tk_augment_timeseries_signature() %>%
+  select(-contains("month"))
+  
+augmented_transactions <- augmented_transactions[complete.cases(augmented_transactions), ]
+```
+
+```{r}
+(var <- data.frame(colnames = colnames(augmented_transactions[, sapply(augmented_transactions, is.numeric)]),
+           colvars = colVars(as.matrix(augmented_transactions[, sapply(augmented_transactions, is.numeric)]))) %>%
+  filter(colvars == 0))
+```
+
+```{r}
+augmented_transactions <- select(augmented_transactions, -one_of(as.character(var$colnames)))
+```
+
+#Removing Highly correlated features
+
+```{r}
+relation <- cor(augmented_transactions[, sapply(augmented_transactions, is.numeric)])
+p.relation <- cor_pmat(augmented_transactions[, sapply(augmented_transactions, is.numeric)])
+
+ggcorrplot(relation,  type = "upper", outline.col = "white", hc.order = TRUE, p.mat = p.relation,
+           colors = c(palette_light()[1], "white", palette_light()[2]))
+```
+
+```{r}
+correlation <- findCorrelation(relation, cutoff=0.8) 
+augmented_transactions <- select(augmented_transactions, -one_of(colnames(relation)[correlation]))
+train <- filter(augmented_transactions, model == "train") %>%
+  select(-model)
+test <- filter(augmented_transactions, model == "test")
+```
+
+```{r}
+fit_lm <- glm(sell_earning ~ ., data = train)
+tidy(fit_lm) %>%
+  gather(x, y, estimate:p.value) %>%
+  ggplot(aes(x = term, y = y, color = x, fill = x)) +
+    facet_wrap(~ x, scales = "free", ncol = 2) +
+    geom_bar(stat = "identity", alpha = 0.8) +
+    scale_color_manual(values = palette_light()) +
+    scale_fill_manual(values = palette_light()) +
+    theme_tq() + labs(x="", y="")+
+    theme(axis.text.x = element_text(angle = 75, vjust = 1, hjust = 1))
+```
+
+```{r}
+augment(fit_lm) %>%
+  ggplot(aes(x = date, y = .resid)) +
+    geom_hline(yintercept = 0, color = "red") +
+    geom_point(alpha = 0.5, color = palette_light()[[1]]) +
+    geom_smooth() +
+    theme_tq()
+```
+
+
+#Visualizing the Prediction test
+```{r}
+pred_test <- test %>%
+  add_predictions(fit_lm, "pred_lm") %>%
+  add_residuals(fit_lm, ".resid_lm")
+```
+
+```{r}
+pred_test %>%
+    ggplot(aes(x = date, y = .resid_lm)) +
+    geom_hline(yintercept = 0, color = "red") +
+    geom_point(alpha = 0.5, color = palette_light()[[1]]) +
+    geom_smooth() +
+    theme_tq()
+```
+
+
+```{r}
+pred_test %>%
+  gather(x, y, sell_earning, pred_lm) %>%
+  ggplot(aes(x = date, y = y, color = x)) +
+    geom_point(alpha = 0.5) +
+    geom_line(alpha = 0.5) +
+    scale_color_manual(values = palette_light()) +
+    theme_tq()
+```
+
+# Forcasting
+
+```{r}
+# Extract index
+time_index <- transaction_per_day %>%
+    tk_index()
+
+```
+
+```{r }
+augmented_transactions %>%
+  ggplot(aes(x = date, y = diff)) +
+    geom_point(alpha = 0.5, aes(color = as.factor(diff))) +
+    geom_line(alpha = 0.5) +
+    scale_color_manual(values = palette_light()) +
+    theme_tq()
+```
+
+
+```{r }
+augmented_transactions %>%
+  select(date, wday.lbl, diff) %>%
+  filter(wday.lbl != "Sunday" & diff > 86400) %>%
+  mutate(days_missing = diff / 86400 -1)
+```
+
+```{r}
+off_days <- c("2010-12-24", "2010-12-25", "2010-12-26", "2010-12-27", "2010-12-28", "2010-12-29", "2010-12-30", "2010-01-01", "2010-01-02", "2010-01-03",
+              "2011-04-22", "2011-04-23", "2011-04-24", "2011-04-25", "2011-05-02", "2011-05-30", "2011-08-29", "2011-04-29", "2011-04-30") %>% 
+  ymd()
+```
+
+```{r}
+future_time_index <- time_index %>%
+    tk_make_future_timeseries(n_future = 300, inspect_weekdays = TRUE, inspect_months = FALSE, skip_values = off_days)
+future_time_index %>%
+    tk_get_timeseries_signature() %>%
+    ggplot(aes(x = index, y = diff)) +
+    geom_point(alpha = 0.5, aes(color = as.factor(diff))) +
+    geom_line(alpha = 0.5) +
+    scale_color_manual(values = palette_light()) +
+    theme_tq()
+```
+
+
+```{r }
+future_data <- future_time_index %>%
+    tk_get_timeseries_signature() %>%
+    rename(date = index)
+
+prediction <- predict(fit_lm, newdata = future_data)
+
+prediction <- future_data %>%
+    select(date) %>%
+    add_column(sell_earning = prediction)
+transaction_per_day %>%
+  select(sell_date, sell_earning) %>%
+  rename(date = sell_date) %>%
+  rbind(prediction) %>%
+  ggplot(aes(x = date, y = sell_earning)) +
+    scale_x_date() +
+    geom_vline(xintercept = as.numeric(max(transaction_per_day$sell_date)), color = "red", size = 1) +
+    geom_point(alpha = 0.5) +
+    geom_line(alpha = 0.5) +
+    theme_tq()
+```
+
+```{r}
+residual_testing <- pred_test$.resid_lm
+sd_of_res_testing <- sd(residual_testing, na.rm = TRUE)
+
+prediction <- prediction %>%
+    mutate(
+        lo.95 = sell_earning - 1.96 * sd_of_res_testing,
+        lo.80 = sell_earning - 1.28 * sd_of_res_testing,
+        hi.80 = sell_earning + 1.28 * sd_of_res_testing,
+        hi.95 = sell_earning + 1.96 * sd_of_res_testing
+        )
+```
+
+
+```{r}
+transaction_per_day %>%
+  select(sell_date, sell_earning) %>%
+  rename(date = sell_date) %>%
+  ggplot(aes(x = date, y = sell_earning)) +
+    geom_point(alpha = 0.5) +
+    geom_line(alpha = 0.5) +
+    geom_ribbon(aes(ymin = lo.95, ymax = hi.95), data = prediction, 
+                fill = "#D5DBFF", color = NA, size = 0) +
+    geom_ribbon(aes(ymin = lo.80, ymax = hi.80, fill = key), data = prediction,
+                fill = "#596DD5", color = NA, size = 0, alpha = 0.8) +
+    geom_point(aes(x = date, y = sell_earning), data = prediction,
+               alpha = 0.5, color = palette_light()[[2]]) +
+    geom_smooth(aes(x = date, y = sell_earning), data = prediction,
+                method = 'loess', color = "white") +
+    theme_tq()
+```
+
+# Prediction using another model
+
+```{r}
+transaction_per_day <- transaction_per_day %>%
+  mutate(model = ifelse(sell_date <= "2011-10-01", "train2", "test2"))
+
+train2 <- filter(transaction_per_day, model == "train2") %>%
+  select(sell_date, sell_earning) %>%
+  rename(ds = sell_date,
+         y = sell_earning)
+
+test2 <- filter(transaction_per_day, model == "test2") %>%
+  select(sell_date, sell_earning) %>%
+  rename(ds = sell_date)
+```
+
+```{r}
+closed <- data.frame(ds = as.Date(c("2010-12-24", "2010-12-25", "2010-12-26", "2010-12-27", "2010-12-28", 
+                                      "2010-12-29", "2010-12-30", "2010-01-01", "2010-01-02", "2010-01-03",
+                                      "2011-04-22", "2011-04-23", "2011-04-24", "2011-04-25", "2011-05-02", 
+                                      "2011-05-30", "2011-08-29", "2011-04-29", "2011-04-30"))) %>%
+  mutate(holiday = paste0("off_day_", seq_along(1:length(ds))))
+prophet_model_test <- prophet(train2, 
+                              growth = "linear", # growth curve trend
+                              n.changepoints = 100, # Prophet automatically detects changes in trends by selecting changepoints from the data
+                              yearly.seasonality = FALSE, # yearly seasonal component using Fourier series
+                              weekly.seasonality = TRUE, # weekly seasonal component using dummy variables
+                              holidays = closed) 
+```
+
+# Predicting test data
+```{r}
+forecasting <- predict(prophet_model_test, test2)
+forecasting %>%
+  mutate(.resid2 = trend - yhat) %>%
+  ggplot(aes(x = ds, y = .resid2)) +
+    geom_hline(yintercept = 0, color = "red") +
+    geom_point(alpha = 0.5, color = palette_light()[[1]]) +
+    geom_smooth() +
+    theme_tq()
+```
+
+
+```{r}
+future <- make_future_dataframe(prophet_model_test, periods = 300)
+forecast <- predict(prophet_model_test, future)
+plot(prophet_model_test, forecast) +
+    theme_tq()
+
+
+```
+
+
+
